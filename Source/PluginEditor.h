@@ -39,16 +39,14 @@ private:
     void drawScope (juce::Graphics&);
     void drawModules (juce::Graphics&);
     void drawBottom (juce::Graphics&);
-    void drawVU (juce::Graphics&, juce::Rectangle<float>);
-    void startLearn();
-    void finishLearn();
+    void drawVU (juce::Graphics&, juce::Rectangle<float>, bool levelMode);
     void setParam (const char* id, float value);
     static juce::Rectangle<int> clipRect() { return { 560, 120, 106, 18 }; }
 
     SnobbyAudioProcessor& proc;
     SnobbyLnF lnf;
     juce::Slider faders[6], knobs[3];
-    juce::TextButton bypass, learn;
+    juce::TextButton bypass, learn, vuBtn;
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
@@ -56,12 +54,10 @@ private:
     std::unique_ptr<BA> ba;
 
     Meter inM, outM;
-    float voiceOut = -18.f, gr = 0.f;
-    bool seen = false, clip = false;
+    float voiceVu = 0.f, needle = -20.f;
+    bool seen = false, clip = false, grMode = false;
 
     float sIn[24], sOut[24];
-    int learnTicks = 0;
-    float learnSum[6] = {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SnobbyFace)
 };

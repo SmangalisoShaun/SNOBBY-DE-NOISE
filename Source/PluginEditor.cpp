@@ -6,7 +6,6 @@ namespace
     const char* faderIds[6]    = { "rumble", "body", "presence", "hissLow", "hissMid", "hissHigh" };
     const char* faderNames[6]  = { "RUMBLE", "BODY", "PRESENCE", "HISS LOW", "HISS MID", "HISS HIGH" };
     const char* faderRanges[6] = { "20-120 Hz", "120-500 Hz", "500-5k Hz", "5k-8k Hz", "8k-12k Hz", "12k-20k Hz" };
-    const char* thrIds[6]      = { "thr0", "thr1", "thr2", "thr3", "thr4", "thr5" };
     const char* knobIds[3]     = { "attack", "release", "output" };
     const char* knobNames[3]   = { "ATTACK", "RELEASE", "OUTPUT" };
 
@@ -220,8 +219,18 @@ SnobbyFace::SnobbyFace (SnobbyAudioProcessor& p) : proc (p)
 
     learn.setName ("LEARN HISS");
     learn.setLookAndFeel (&lnf);
-    learn.onClick = [this] { startLearn(); };
+    learn.onClick = [this] { proc.startLearn(); };
     addAndMakeVisible (learn);
+
+    vuBtn.setName ("VU: LEVEL");
+    vuBtn.setLookAndFeel (&lnf);
+    vuBtn.onClick = [this]
+    {
+        grMode = ! grMode;
+        vuBtn.setName (grMode ? "VU: GR" : "VU: LEVEL");
+        repaint();
+    };
+    addAndMakeVisible (vuBtn);
 
     startTimerHz (30);
 }
@@ -232,6 +241,7 @@ SnobbyFace::~SnobbyFace()
     for (auto& s : knobs) s.setLookAndFeel (nullptr);
     bypass.setLookAndFeel (nullptr);
     learn.setLookAndFeel (nullptr);
+    vuBtn.setLookAndFeel (nullptr);
 }
 
 void SnobbyFace::resized()
@@ -242,6 +252,7 @@ void SnobbyFace::resized()
         knobs[i].setBounds (100 + 100 * i - 32, 554, 64, 64);
     bypass.setBounds (592, 564, 84, 40);
     learn.setBounds (592, 646, 84, 40);
+    vuBtn.setBounds (420, 702, 100, 36);
 }
 
 void SnobbyFace::mouseDown (const MouseEvent& e)
@@ -255,22 +266,6 @@ void SnobbyFace::setParam (const char* id, float value)
         p->setValueNotifyingHost (p->convertTo0to1 (value));
 }
 
-void SnobbyFace::startLearn()
-{
-    for (auto& v : learnSum) v = 0.f;
-    learnTicks = 60;   // about 2 seconds
-}
-
-void SnobbyFace::finishLearn()
-{
-    for (int b = 3; b < 6; ++b)
-    {
-        const float noise = learnSum[b] / 60.f;
-        setParam (thrIds[b], jlimit (-90.f, -20.f, noise + 6.f));
-        setParam (faderIds[b], -jlimit (6.f, 26.f, (noise + 78.f) * 1.2f));
-    }
-}
-
 void SnobbyFace::timerCallback()
 {
     const float dt = 1.f / 30.f;
@@ -279,9 +274,12 @@ void SnobbyFace::timerCallback()
     inM.update (inLin, dt);
     outM.update (outLin, dt);
     if (inLin >= 0.999f || outLin >= 0.999f) clip = true;
-    if (inM.pk > -45.f) { seen = true; voiceOut += (outM.avg - voiceOut) * dt * 0.8f; }
 
-    gr += (proc.grDb.load() - gr) * 0.15f;
+    const float vuNow = proc.vuDb.load() + 18.f;     // 0 VU = -18 dBFS
+    if (inM.pk > -45.f) { seen = true; voiceVu += (vuNow - voiceVu) * dt * 0.8f; }
+
+    const float target = grMode ? proc.grDb.load() : jlimit (-20.f, 3.5f, vuNow);
+    needle += (target - needle) * 0.25f;
 
     for (int k = 0; k < 24; ++k)
     {
@@ -289,10 +287,12 @@ void SnobbyFace::timerCallback()
         sOut[k] += (proc.specOut[k].load() - sOut[k]) * 0.35f;
     }
 
-    if (learnTicks > 0)
+    if (proc.learnState.load() == 2)
     {
-        for (int b = 0; b < 6; ++b) learnSum[b] += proc.bandDb[b].load();
-        if (--learnTicks == 0) finishLearn();
+        setParam ("hissLow", -14.f);
+        setParam ("hissMid", -26.f);
+        setParam ("hissHigh", -30.f);
+        proc.learnState.store (0);
     }
     repaint();
 }
@@ -342,8 +342,9 @@ void SnobbyFace::drawLevels (Graphics& g)
     const float x0 = 82.f, w = 580.f;
     auto xd = [&] (float db) { return x0 + (db + 60.f) / 60.f * w; };
 
+    // 0 VU = -18 dBFS, target is 0 VU plus or minus 3 dB
     g.setColour (Colour (0x1a50e68c));
-    g.fillRect (xd (-24.f), s.getY() + 2.f, xd (-12.f) - xd (-24.f), 36.f);
+    g.fillRect (xd (-21.f), s.getY() + 2.f, xd (-15.f) - xd (-21.f), 36.f);
 
     txt (g, "IN",  R (52, s.getY() + 6.f, 28, 12), 10.f, Colour (0xffcfd9d3), Justification::centredLeft);
     txt (g, "OUT", R (52, s.getY() + 22.f, 28, 12), 10.f, Colour (0xffcfd9d3), Justification::centredLeft);
@@ -351,8 +352,8 @@ void SnobbyFace::drawLevels (Graphics& g)
     ladder (g, outM.avg, outM.pk, outM.hold, R (x0, s.getY() + 22.f, w, 12));
 
     g.setColour (mint);
-    g.fillRect (xd (-24.f), s.getY() + 38.f, xd (-12.f) - xd (-24.f), 2.f);
-    txt (g, "TARGET AVERAGE", R (xd (-24.f), s.getY() + 41.f, xd (-12.f) - xd (-24.f), 10), 8.f, Colour (0xff7fe0a8));
+    g.fillRect (xd (-21.f), s.getY() + 38.f, xd (-15.f) - xd (-21.f), 2.f);
+    txt (g, "0 VU = -18", R (xd (-27.f), s.getY() + 41.f, xd (-9.f) - xd (-27.f), 10), 8.f, Colour (0xff7fe0a8));
     for (int d : { -60, -48, -36, -24, -12, -6, 0 })
     {
         g.setColour (Colour (0xff9aa8a1));
@@ -361,12 +362,12 @@ void SnobbyFace::drawLevels (Graphics& g)
     }
 
     String st; Colour sc;
-    const bool hot = clip || outM.hold > -1.5f || voiceOut > -12.f;
-    int adv = roundToInt (-18.f - voiceOut);
+    const bool hot = clip || outM.hold > -1.5f || voiceVu > 3.f;
+    int adv = roundToInt (-voiceVu);
     if (! seen)                  { st = "NO SIGNAL"; sc = Colour (0xff9aa8a1); }
     else if (hot)                { adv = jmin (adv, -1); st = "TOO HOT  " + String (adv) + " dB"; sc = Colour (0xffff7a6e); }
-    else if (voiceOut < -24.f)   { st = "TOO QUIET  +" + String (adv) + " dB"; sc = Colour (0xffffc46b); }
-    else                         { st = "GOOD"; sc = mint; }
+    else if (voiceVu < -3.f)     { st = "TOO QUIET  +" + String (adv) + " dB"; sc = Colour (0xffffc46b); }
+    else                         { st = "GOOD  " + String (voiceVu, 1) + " VU"; sc = mint; }
 
     lamp (g, 62.f, s.getY() + 77.f, 5.f, sc, seen);
     txt (g, st, R (74, s.getY() + 68.f, 260, 18), 11.f, sc, Justification::centredLeft);
@@ -451,15 +452,19 @@ void SnobbyFace::drawScope (Graphics& g)
     g.setColour (Colour (0xff4dffa0));
     g.strokePath (pout, PathStrokeType (1.8f));
 
+    // dashed lines: the noise floor the plugin is tracking in each band
     g.setColour (Colour (0xb36ef0a5));
     for (int b = 0; b < 6; ++b)
     {
-        const float y = yOf (proc.apvts.getRawParameterValue (thrIds[b])->load());
+        float nf = 0.f;
+        for (int s4 = 0; s4 < 4; ++s4) nf += proc.noiseDisp[b * 4 + s4].load();
+        nf *= 0.25f;
+        const float y = yOf (nf);
         const float x1 = sc.getX() + W * (float) b / 6.f + 6.f, x2 = sc.getX() + W * (float) (b + 1) / 6.f - 6.f;
         for (float x = x1; x < x2; x += 9.f) g.drawLine (x, y, jmin (x + 5.f, x2), y, 1.f);
     }
 
-    if (learnTicks > 0)
+    if (proc.learnState.load() == 1)
         txt (g, "LEARNING NOISE - KEEP SILENT", R (sc.getX(), sc.getY() + 4.f, W, 14), 10.f, Colour (0xffffc46b));
 
     g.setGradientFill (ColourGradient (Colour (0x24ffffff), sc.getX(), sc.getY(), Colour (0x00ffffff), sc.getX() + W * 0.35f, sc.getY() + H * 0.6f, false));
@@ -510,18 +515,18 @@ void SnobbyFace::drawBottom (Graphics& g)
         lcd (g, R (cx - 42.f, 648, 84, 22), s);
     }
 
-    drawVU (g, R (370, 550, 200, 127));
-    txt (g, "GAIN REDUCTION", R (370, 684, 200, 14), 10.f, ink);
+    drawVU (g, R (370, 550, 200, 127), ! grMode);
+    txt (g, grMode ? "GAIN REDUCTION" : "OUTPUT LEVEL", R (370, 682, 180, 14), 10.f, ink);
 
     const bool byp = proc.apvts.getRawParameterValue ("bypass")->load() > 0.5f;
     lamp (g, 634.f, 552.f, 6.f, Colour (0xff43e273), ! byp);
     txt (g, "CHANNEL IN / OUT", R (570, 606, 128, 12), 8.f, Colour (0xff3f4a45));
 
-    lamp (g, 634.f, 634.f, 6.f, Colour (0xffffb341), learnTicks > 0);
+    lamp (g, 634.f, 634.f, 6.f, Colour (0xffffb341), proc.learnState.load() == 1);
     txt (g, "PLAY SILENCE, THEN PRESS", R (550, 690, 168, 12), 8.f, Colour (0xff3f4a45));
 }
 
-void SnobbyFace::drawVU (Graphics& g, Rectangle<float> r)
+void SnobbyFace::drawVU (Graphics& g, Rectangle<float> r, bool levelMode)
 {
     g.setColour (Colours::black.withAlpha (0.5f));
     g.fillRoundedRectangle (r.translated (0, 6.f), 10.f);
@@ -539,38 +544,40 @@ void SnobbyFace::drawVU (Graphics& g, Rectangle<float> r)
     g.fillRect (face);
 
     const float s = face.getWidth() / 200.f, ox = face.getX(), oy = face.getY();
+    const float lo = levelMode ? -20.f : 0.f, hi = levelMode ? 3.f : 20.f, redFrom = levelMode ? 0.f : 15.f;
     auto P = [&] (float deg, float rad)
     {
         const float a = degreesToRadians (deg);
         return Point<float> (ox + (100.f + rad * std::sin (a)) * s, oy + (135.f - rad * std::cos (a)) * s);
     };
-    auto A = [] (float v) { return -48.f + v / 20.f * 96.f; };
+    auto A = [&] (float v) { return -48.f + (v - lo) / (hi - lo) * 96.f; };
 
     Path base, red;
-    base.addCentredArc (ox + 100.f * s, oy + 135.f * s, 95.f * s, 95.f * s, 0.f, degreesToRadians (A (0)), degreesToRadians (A (15)), true);
-    red.addCentredArc  (ox + 100.f * s, oy + 135.f * s, 95.f * s, 95.f * s, 0.f, degreesToRadians (A (15)), degreesToRadians (A (20)), true);
+    base.addCentredArc (ox + 100.f * s, oy + 135.f * s, 95.f * s, 95.f * s, 0.f, degreesToRadians (A (lo)), degreesToRadians (A (redFrom)), true);
+    red.addCentredArc  (ox + 100.f * s, oy + 135.f * s, 95.f * s, 95.f * s, 0.f, degreesToRadians (A (redFrom)), degreesToRadians (A (hi)), true);
     g.setColour (Colour (0xff2a2620));
     g.strokePath (base, PathStrokeType (1.2f * s));
     g.setColour (Colour (0xffb3261e));
     g.strokePath (red, PathStrokeType (3.2f * s));
 
-    for (int v = 0; v <= 20; ++v)
+    for (int v = (int) lo; v <= (int) hi; ++v)
     {
-        const bool major = v % 5 == 0;
-        g.setColour (v >= 15 ? Colour (0xffb3261e) : Colour (0xff2a2620));
+        const bool major = levelMode ? (v == -20 || v == -10 || v == -5 || v == 0 || v == 3) : (v % 5 == 0);
+        const bool isRed = (float) v >= redFrom;
+        g.setColour (isRed ? Colour (0xffb3261e) : Colour (0xff2a2620));
         g.drawLine (Line<float> (P (A ((float) v), 95.f), P (A ((float) v), major ? 83.f : 89.f)), (major ? 1.6f : 0.8f) * s);
         if (major)
         {
             auto p = P (A ((float) v), 73.f);
-            txt (g, String (v), R (p.x - 10.f, p.y - 7.f, 20, 14), 9.f * s + 1.f,
-                 v >= 15 ? Colour (0xffb3261e) : Colour (0xff2a2620), Justification::centred, false);
+            txt (g, (levelMode && v > 0 ? "+" : "") + String (v), R (p.x - 12.f, p.y - 7.f, 24, 14), 9.f * s + 1.f,
+                 isRed ? Colour (0xffb3261e) : Colour (0xff2a2620), Justification::centred, false);
         }
     }
 
     txt (g, "BOOMHYPE TECH", R (ox, oy + 17.f * s, face.getWidth(), 10.f), 6.5f, Colour (0xff4a4436));
-    txt (g, "dB", R (ox, oy + 104.f * s, face.getWidth(), 12.f), 9.f, Colour (0xff2a2620), Justification::centred, false);
+    txt (g, levelMode ? "VU" : "dB", R (ox, oy + 104.f * s, face.getWidth(), 12.f), 9.f, Colour (0xff2a2620), Justification::centred, false);
 
-    const float deg = A (jlimit (0.f, 21.f, gr));
+    const float deg = A (jlimit (lo, hi + 1.f, needle));
     const auto pivot = Point<float> (ox + 100.f * s, oy + 135.f * s);
     g.setColour (Colours::black.withAlpha (0.25f));
     g.drawLine (Line<float> (pivot.translated (3.f, 3.f), P (deg, 101.f).translated (3.f, 3.f)), 2.f);
