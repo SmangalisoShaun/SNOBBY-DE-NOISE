@@ -14,11 +14,15 @@ public:
                                bool highlighted, bool down) override;
 };
 
-class SnobbyEditor : public juce::AudioProcessorEditor, private juce::Timer
+// The whole faceplate, drawn at a fixed design size (720 x 760).
+// The editor scales it, so the plugin can be resized.
+class SnobbyFace : public juce::Component, private juce::Timer
 {
 public:
-    explicit SnobbyEditor (SnobbyAudioProcessor&);
-    ~SnobbyEditor() override;
+    static constexpr int baseW = 720, baseH = 760;
+
+    explicit SnobbyFace (SnobbyAudioProcessor&);
+    ~SnobbyFace() override;
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
@@ -32,15 +36,19 @@ private:
 
     void timerCallback() override;
     void drawLevels (juce::Graphics&);
+    void drawScope (juce::Graphics&);
     void drawModules (juce::Graphics&);
     void drawBottom (juce::Graphics&);
     void drawVU (juce::Graphics&, juce::Rectangle<float>);
+    void startLearn();
+    void finishLearn();
+    void setParam (const char* id, float value);
     static juce::Rectangle<int> clipRect() { return { 560, 120, 106, 18 }; }
 
     SnobbyAudioProcessor& proc;
     SnobbyLnF lnf;
     juce::Slider faders[6], knobs[3];
-    juce::TextButton bypass;
+    juce::TextButton bypass, learn;
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using BA = juce::AudioProcessorValueTreeState::ButtonAttachment;
@@ -51,5 +59,22 @@ private:
     float voiceOut = -18.f, gr = 0.f;
     bool seen = false, clip = false;
 
+    float sIn[24], sOut[24];
+    int learnTicks = 0;
+    float learnSum[6] = {};
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SnobbyFace)
+};
+
+class SnobbyEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit SnobbyEditor (SnobbyAudioProcessor&);
+    void paint (juce::Graphics&) override {}
+    void resized() override;
+
+private:
+    SnobbyFace face;
+    juce::ComponentBoundsConstrainer constrainer;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SnobbyEditor)
 };

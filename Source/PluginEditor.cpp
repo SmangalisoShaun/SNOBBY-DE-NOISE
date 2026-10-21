@@ -6,6 +6,7 @@ namespace
     const char* faderIds[6]    = { "rumble", "body", "presence", "hissLow", "hissMid", "hissHigh" };
     const char* faderNames[6]  = { "RUMBLE", "BODY", "PRESENCE", "HISS LOW", "HISS MID", "HISS HIGH" };
     const char* faderRanges[6] = { "20-120 Hz", "120-500 Hz", "500-5k Hz", "5k-8k Hz", "8k-12k Hz", "12k-20k Hz" };
+    const char* thrIds[6]      = { "thr0", "thr1", "thr2", "thr3", "thr4", "thr5" };
     const char* knobIds[3]     = { "attack", "release", "output" };
     const char* knobNames[3]   = { "ATTACK", "RELEASE", "OUTPUT" };
 
@@ -173,7 +174,7 @@ void SnobbyLnF::drawButtonBackground (Graphics& g, Button& b, const Colour&, boo
 }
 
 //==============================================================================
-void SnobbyEditor::Meter::update (float lin, float dt)
+void SnobbyFace::Meter::update (float lin, float dt)
 {
     const float d = Decibels::gainToDecibels (lin, -90.f);
     if (d > pk) pk = d; else pk = jmax (-90.f, pk - dt * 26.f);
@@ -183,10 +184,10 @@ void SnobbyEditor::Meter::update (float lin, float dt)
     avg = jmax (avg, -90.f);
 }
 
-SnobbyEditor::SnobbyEditor (SnobbyAudioProcessor& p)
-    : AudioProcessorEditor (&p), proc (p)
+SnobbyFace::SnobbyFace (SnobbyAudioProcessor& p) : proc (p)
 {
-    setSize (720, 600);
+    for (auto& v : sIn)  v = -90.f;
+    for (auto& v : sOut) v = -90.f;
 
     for (int i = 0; i < 6; ++i)
     {
@@ -217,31 +218,60 @@ SnobbyEditor::SnobbyEditor (SnobbyAudioProcessor& p)
     addAndMakeVisible (bypass);
     ba = std::make_unique<BA> (proc.apvts, "bypass", bypass);
 
+    learn.setName ("LEARN HISS");
+    learn.setLookAndFeel (&lnf);
+    learn.onClick = [this] { startLearn(); };
+    addAndMakeVisible (learn);
+
     startTimerHz (30);
 }
 
-SnobbyEditor::~SnobbyEditor()
+SnobbyFace::~SnobbyFace()
 {
     for (auto& s : faders) s.setLookAndFeel (nullptr);
     for (auto& s : knobs) s.setLookAndFeel (nullptr);
     bypass.setLookAndFeel (nullptr);
+    learn.setLookAndFeel (nullptr);
 }
 
-void SnobbyEditor::resized()
+void SnobbyFace::resized()
 {
     for (int i = 0; i < 6; ++i)
-        faders[i].setBounds ((int) (46.f + (float) i * 104.6667f) + 30, 206, 44, 120);
+        faders[i].setBounds ((int) (46.f + (float) i * 104.6667f) + 30, 360, 44, 120);
     for (int i = 0; i < 3; ++i)
-        knobs[i].setBounds (100 + 100 * i - 32, 400, 64, 64);
-    bypass.setBounds (592, 428, 84, 40);
+        knobs[i].setBounds (100 + 100 * i - 32, 554, 64, 64);
+    bypass.setBounds (592, 564, 84, 40);
+    learn.setBounds (592, 646, 84, 40);
 }
 
-void SnobbyEditor::mouseDown (const MouseEvent& e)
+void SnobbyFace::mouseDown (const MouseEvent& e)
 {
     if (clipRect().contains (e.getPosition())) clip = false;
 }
 
-void SnobbyEditor::timerCallback()
+void SnobbyFace::setParam (const char* id, float value)
+{
+    if (auto* p = proc.apvts.getParameter (id))
+        p->setValueNotifyingHost (p->convertTo0to1 (value));
+}
+
+void SnobbyFace::startLearn()
+{
+    for (auto& v : learnSum) v = 0.f;
+    learnTicks = 60;   // about 2 seconds
+}
+
+void SnobbyFace::finishLearn()
+{
+    for (int b = 3; b < 6; ++b)
+    {
+        const float noise = learnSum[b] / 60.f;
+        setParam (thrIds[b], jlimit (-90.f, -20.f, noise + 6.f));
+        setParam (faderIds[b], -jlimit (6.f, 26.f, (noise + 78.f) * 1.2f));
+    }
+}
+
+void SnobbyFace::timerCallback()
 {
     const float dt = 1.f / 30.f;
     const float inLin  = proc.inLevel.exchange (0.f);
@@ -251,28 +281,37 @@ void SnobbyEditor::timerCallback()
     if (inLin >= 0.999f || outLin >= 0.999f) clip = true;
     if (inM.pk > -45.f) { seen = true; voiceOut += (outM.avg - voiceOut) * dt * 0.8f; }
 
-    float sum = 0.f;
-    for (auto& f : faders) sum -= (float) f.getValue();
-    const bool byp = proc.apvts.getRawParameterValue ("bypass")->load() > 0.5f;
-    const float target = byp ? 0.f : (sum / 6.f) * 1.15f;
-    gr += (target - gr) * 0.15f;
+    gr += (proc.grDb.load() - gr) * 0.15f;
+
+    for (int k = 0; k < 24; ++k)
+    {
+        sIn[k]  += (proc.specIn[k].load()  - sIn[k])  * 0.35f;
+        sOut[k] += (proc.specOut[k].load() - sOut[k]) * 0.35f;
+    }
+
+    if (learnTicks > 0)
+    {
+        for (int b = 0; b < 6; ++b) learnSum[b] += proc.bandDb[b].load();
+        if (--learnTicks == 0) finishLearn();
+    }
     repaint();
 }
 
 //==============================================================================
-void SnobbyEditor::paint (Graphics& g)
+void SnobbyFace::paint (Graphics& g)
 {
-    g.setGradientFill (ColourGradient (Colour (0xff24262b), 360, 0, Colour (0xff0d0e10), 360, 600, false));
+    g.setGradientFill (ColourGradient (Colour (0xff24262b), 360, 0, Colour (0xff0d0e10), 360, (float) baseH, false));
     g.fillAll();
 
-    drawUnit (g, R (10, 10, 700, 352));
-    drawUnit (g, R (10, 376, 700, 212));
+    drawUnit (g, R (10, 10, 700, 506));
+    drawUnit (g, R (10, 530, 700, 212));
 
     txt (g, "BOOMHYPE TECH", R (46, 20, 240, 24), 15.f, ink, Justification::centredLeft);
     txt (g, "SNOBBY DENOISE SD-1", R (260, 20, 200, 24), 10.f, Colour (0xff34403b));
     txt (g, "SN 000117 - 2026", R (500, 20, 174, 24), 9.f, Colour (0xff55605b), Justification::centredRight, false);
 
     drawLevels (g);
+    drawScope (g);
     drawModules (g);
     drawBottom (g);
 }
@@ -292,7 +331,7 @@ static void ladder (Graphics& g, float avg, float pk, float hold, Rectangle<floa
     }
 }
 
-void SnobbyEditor::drawLevels (Graphics& g)
+void SnobbyFace::drawLevels (Graphics& g)
 {
     auto s = R (46, 52, 628, 92);
     g.setGradientFill (ColourGradient (Colour (0xff0b0d0e), 0, s.getY(), Colour (0xff040506), 0, s.getBottom(), false));
@@ -341,9 +380,95 @@ void SnobbyEditor::drawLevels (Graphics& g)
     txt (g, "CLIP RESET", R (cr.getX() + 20.f, cr.getY(), cr.getWidth() - 22.f, cr.getHeight()), 9.f, Colour (0xffd8ece0));
 }
 
-void SnobbyEditor::drawModules (Graphics& g)
+void SnobbyFace::drawScope (Graphics& g)
 {
-    const float y = 156.f, h = 202.f;
+    auto bez = R (46, 156, 628, 142);
+    g.setColour (Colours::black.withAlpha (0.35f));
+    g.fillRoundedRectangle (bez.translated (0, 4.f), 13.f);
+    g.setGradientFill (ColourGradient (Colour (0xff0e0e0f), 0, bez.getY(), Colours::black, 0, bez.getBottom(), false));
+    g.fillRoundedRectangle (bez, 13.f);
+    g.setColour (Colour (0xb3ffffff));
+    g.drawRoundedRectangle (bez.expanded (0.5f), 13.f, 1.f);
+
+    auto sc = bez.reduced (6.f);
+    Graphics::ScopedSaveState ss (g);
+    Path clipP;
+    clipP.addRoundedRectangle (sc, 8.f);
+    g.reduceClipRegion (clipP);
+
+    g.setGradientFill (ColourGradient (Colour (0xff0e0f10), 0, sc.getY(), Colour (0xff050606), 0, sc.getBottom(), false));
+    g.fillRect (sc);
+
+    const float W = sc.getWidth(), H = sc.getHeight();
+    auto yOf = [&] (float db) { return sc.getY() + H * jlimit (0.f, 1.f, -db / 80.f); };
+
+    g.setColour (Colour (0x2160d282));
+    g.fillRect (sc.getX() + W * 0.5f, sc.getY(), W * 0.5f, H);
+
+    for (int i = 1; i < 6; ++i)
+    {
+        g.setColour (i == 3 ? Colour (0xbf50dc8c) : Colour (0x14ffffff));
+        g.fillRect (sc.getX() + W * (float) i / 6.f, sc.getY(), 1.f, H);
+    }
+    for (int d : { 20, 40, 60 })
+    {
+        const float y = yOf ((float) -d);
+        g.setColour (Colour (0x12ffffff));
+        g.fillRect (sc.getX(), y, W, 1.f);
+        txt (g, "-" + String (d), R (sc.getX() + 6.f, y - 13.f, 30, 12), 10.f, Colour (0x59ffffff), Justification::centredLeft, false);
+    }
+    txt (g, "HISS", R (sc.getX() + W * 0.5f + 8.f, sc.getY() + 3.f, 40, 12), 10.f, Colour (0xff9ff0bf), Justification::centredLeft);
+
+    auto makePath = [&] (const float* v)
+    {
+        std::vector<Point<float>> pts;
+        pts.push_back ({ sc.getX(), yOf (v[0]) });
+        for (int k = 0; k < 24; ++k) pts.push_back ({ sc.getX() + ((float) k + 0.5f) / 24.f * W, yOf (v[k]) });
+        pts.push_back ({ sc.getRight(), yOf (v[23]) });
+        Path p;
+        p.startNewSubPath (pts[0]);
+        for (size_t i = 1; i + 1 < pts.size(); ++i)
+            p.quadraticTo (pts[i], (pts[i] + pts[i + 1]) * 0.5f);
+        p.lineTo (pts.back());
+        return p;
+    };
+
+    Path pin = makePath (sIn), pout = makePath (sOut);
+
+    Path fin (pin);
+    fin.lineTo (sc.getRight(), sc.getBottom()); fin.lineTo (sc.getX(), sc.getBottom()); fin.closeSubPath();
+    g.setColour (Colour (0x1abebeb4));
+    g.fillPath (fin);
+    g.setColour (Colour (0x80c8c6bc));
+    g.strokePath (pin, PathStrokeType (1.2f));
+
+    Path fout (pout);
+    fout.lineTo (sc.getRight(), sc.getBottom()); fout.lineTo (sc.getX(), sc.getBottom()); fout.closeSubPath();
+    g.setGradientFill (ColourGradient (Colour (0x4746e68c), 0, sc.getY(), Colour (0x0046e68c), 0, sc.getBottom(), false));
+    g.fillPath (fout);
+    g.setColour (Colour (0x4046ff96));
+    g.strokePath (pout, PathStrokeType (4.5f));
+    g.setColour (Colour (0xff4dffa0));
+    g.strokePath (pout, PathStrokeType (1.8f));
+
+    g.setColour (Colour (0xb36ef0a5));
+    for (int b = 0; b < 6; ++b)
+    {
+        const float y = yOf (proc.apvts.getRawParameterValue (thrIds[b])->load());
+        const float x1 = sc.getX() + W * (float) b / 6.f + 6.f, x2 = sc.getX() + W * (float) (b + 1) / 6.f - 6.f;
+        for (float x = x1; x < x2; x += 9.f) g.drawLine (x, y, jmin (x + 5.f, x2), y, 1.f);
+    }
+
+    if (learnTicks > 0)
+        txt (g, "LEARNING NOISE - KEEP SILENT", R (sc.getX(), sc.getY() + 4.f, W, 14), 10.f, Colour (0xffffc46b));
+
+    g.setGradientFill (ColourGradient (Colour (0x24ffffff), sc.getX(), sc.getY(), Colour (0x00ffffff), sc.getX() + W * 0.35f, sc.getY() + H * 0.6f, false));
+    g.fillRect (sc);
+}
+
+void SnobbyFace::drawModules (Graphics& g)
+{
+    const float y = 310.f, h = 202.f;
     auto hiss = R (360, y, 314, h);
 
     g.setGradientFill (ColourGradient (Colour (0xff1f7a4d), 0, y, Colour (0xff0f4a2d), 0, y + h, false));
@@ -372,28 +497,31 @@ void SnobbyEditor::drawModules (Graphics& g)
     }
 }
 
-void SnobbyEditor::drawBottom (Graphics& g)
+void SnobbyFace::drawBottom (Graphics& g)
 {
     for (int i = 0; i < 3; ++i)
     {
         const float cx = 100.f + 100.f * (float) i;
-        txt (g, knobNames[i], R (cx - 45.f, 476, 90, 14), 10.f, ink);
+        txt (g, knobNames[i], R (cx - 45.f, 630, 90, 14), 10.f, ink);
         const double v = knobs[i].getValue();
         String s = i == 0 ? String (v, 1) + " ms"
                  : i == 1 ? String (roundToInt (v)) + " ms"
                           : String (v >= 0 ? "+" : "") + String (v, 1) + " dB";
-        lcd (g, R (cx - 42.f, 494, 84, 22), s);
+        lcd (g, R (cx - 42.f, 648, 84, 22), s);
     }
 
-    drawVU (g, R (370, 396, 200, 127));
-    txt (g, "GAIN REDUCTION", R (370, 530, 200, 14), 10.f, ink);
+    drawVU (g, R (370, 550, 200, 127));
+    txt (g, "GAIN REDUCTION", R (370, 684, 200, 14), 10.f, ink);
 
     const bool byp = proc.apvts.getRawParameterValue ("bypass")->load() > 0.5f;
-    lamp (g, 634.f, 414.f, 6.f, Colour (0xff43e273), ! byp);
-    txt (g, "CHANNEL IN / OUT", R (580, 480, 110, 12), 8.f, Colour (0xff3f4a45));
+    lamp (g, 634.f, 552.f, 6.f, Colour (0xff43e273), ! byp);
+    txt (g, "CHANNEL IN / OUT", R (570, 606, 128, 12), 8.f, Colour (0xff3f4a45));
+
+    lamp (g, 634.f, 634.f, 6.f, Colour (0xffffb341), learnTicks > 0);
+    txt (g, "PLAY SILENCE, THEN PRESS", R (550, 690, 168, 12), 8.f, Colour (0xff3f4a45));
 }
 
-void SnobbyEditor::drawVU (Graphics& g, Rectangle<float> r)
+void SnobbyFace::drawVU (Graphics& g, Rectangle<float> r)
 {
     g.setColour (Colours::black.withAlpha (0.5f));
     g.fillRoundedRectangle (r.translated (0, 6.f), 10.f);
@@ -451,4 +579,22 @@ void SnobbyEditor::drawVU (Graphics& g, Rectangle<float> r)
 
     g.setGradientFill (ColourGradient (Colour (0x66ffffff), face.getX(), face.getY(), Colour (0x00ffffff), face.getCentreX(), face.getCentreY(), false));
     g.fillRect (face);
+}
+
+//==============================================================================
+SnobbyEditor::SnobbyEditor (SnobbyAudioProcessor& p)
+    : AudioProcessorEditor (&p), face (p)
+{
+    addAndMakeVisible (face);
+    constrainer.setFixedAspectRatio ((double) SnobbyFace::baseW / (double) SnobbyFace::baseH);
+    constrainer.setSizeLimits (432, 456, 1440, 1520);
+    setConstrainer (&constrainer);
+    setResizable (true, true);
+    setSize (SnobbyFace::baseW, SnobbyFace::baseH);
+}
+
+void SnobbyEditor::resized()
+{
+    face.setBounds (0, 0, SnobbyFace::baseW, SnobbyFace::baseH);
+    face.setTransform (AffineTransform::scale ((float) getWidth() / (float) SnobbyFace::baseW));
 }
