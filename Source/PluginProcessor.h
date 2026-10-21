@@ -27,6 +27,9 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
+    // peak levels (linear) since the editor last read them
+    std::atomic<float> inLevel { 0.f }, outLevel { 0.f };
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SnobbyAudioProcessor)

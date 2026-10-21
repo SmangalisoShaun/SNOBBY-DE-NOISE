@@ -41,13 +41,28 @@ bool SnobbyAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) const
            && out == l.getMainInputChannelSet();
 }
 
+static void raiseTo (std::atomic<float>& a, float v)
+{
+    float c = a.load();
+    while (v > c && ! a.compare_exchange_weak (c, v)) {}
+}
+
 void SnobbyAudioProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer&)
 {
     ScopedNoDenormals noDenormals;
-    if (apvts.getRawParameterValue ("bypass")->load() > 0.5f) return;
+    const int n = buffer.getNumSamples();
+    const float inPk = buffer.getMagnitude (0, n);
+    raiseTo (inLevel, inPk);
+
+    if (apvts.getRawParameterValue ("bypass")->load() > 0.5f)
+    {
+        raiseTo (outLevel, inPk);
+        return;
+    }
 
     // placeholder: output gain only. Band splitting and cleaning go here next.
     buffer.applyGain (Decibels::decibelsToGain (apvts.getRawParameterValue ("output")->load()));
+    raiseTo (outLevel, buffer.getMagnitude (0, n));
 }
 
 AudioProcessorEditor* SnobbyAudioProcessor::createEditor() { return new SnobbyEditor (*this); }
